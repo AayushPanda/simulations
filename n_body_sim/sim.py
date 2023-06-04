@@ -1,105 +1,112 @@
 import math
-import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import animation
-import matplotlib
+import config
+from numba import njit, cuda, jit
+from numba.typed import Dict
+from numba.types import float64, unicode_type
+import numpy as np
 
-def updateline(num, data, line1, data2, line2):
-    line1.set_data(data[..., :num])
-    line2.set_data(data2[..., :num])
-     
-    time_text.set_text("Points: %.0f" % int(num))
-     
-    return line1, line2
+data = config.EML4
+masses = data['bodies']
+frame = data['frame']
+PDbodies = [{'mass': mass[0], 'x': mass[1], 'y': mass[2], 'vx': mass[3], 'vy': mass[4], 'name': mass[5], 'colour': mass[6]} for mass in masses]
+bodies = []
+for mass in masses:
+    bodies.append(Dict.empty(key_type=unicode_type, value_type=float64))
+    bodies[-1]['mass'] = float(mass[0])
+    bodies[-1]['x'] = float(mass[1])
+    bodies[-1]['y'] = float(mass[2])
+    bodies[-1]['vx'] = float(mass[3])
+    bodies[-1]['vy'] = float(mass[4])
 
-class Body():
-    def __init__(self, mass, x, y, vx, vy):
-        self.mass = mass
-        self.velocity = [vx, vy]
-        self.x = x
-        self.y = y
-    def update(self, timestep):
-        self.x += self.velocity[0]*timestep
-        self.y += self.velocity[1]*timestep
 
-# Array of bodies in format (mass, x, y, vx, vy) for the earth and moon
-masses = [[7.3477*10**23, 0, 0, 0, -100],  # earth
-          [7.3477*10**22, 384400000, 0, 0, 1022]] # moon
+nbodies = len(bodies)
 
-bodies = [Body(mass[0], mass[1], mass[2], mass[3], mass[4]) for mass in masses]
-body_history = [[], []]
-# simulate for 1 week
-
-timestep = 60 # timestep = 1 minute
+timestep = 60 # timestep = 1 day
+simtime = 30*24*60*60 # simtime = 1 month
 step = 0
 
-while step <= 7*24*60*100:
-    for body in bodies:
-        Fg = [0, 0]
-        for other in bodies:
-            if other!= body:
-                r = math.sqrt((body.x-other.x)**2 + (body.y-other.y)**2)
-                if r!= 0:
-                    mFg = ((0.000001)*body.mass*other.mass)/(r**2) #6.67408*10**-11
-                    theta = math.atan2((+other.y-body.y), (other.x-body.x))
-                    Fg = [mFg*math.cos(theta), mFg*math.sin(theta)]
+body_history = np.array([[np.zeros(1 + simtime//timestep),np.zeros(1 + simtime//timestep)] for _ in bodies])
 
-        body.velocity[0] += Fg[0]/body.mass
-        body.velocity[1] += Fg[1]/body.mass
+@jit()
+def sim(step, timestep, simtime, bodies, body_history, nbodies):
+    while step < simtime:
+        for i in range(nbodies):
+            body = bodies[i]
+            Fg = [0, 0]
+            for j in range(nbodies):
+                if i != j:
+                    other = bodies[j]
+                    r = math.sqrt((other['x'] - body['x'])**2 + (other['y'] - body['y'])**2)
+                    if r > 0:
+                        mFg = ((6.67408*(10**-11))*body['mass']*other['mass'])/(r**2) #6.67408*10**-11
+                        theta = math.atan2((other['y'] - body['y']), (other['x'] - body['x']))
+                        Fg[0] += mFg*math.cos(theta)
+                        Fg[1] += mFg*math.sin(theta)
+            body['vx'] += timestep * Fg[0]/body['mass']
+            body['vy'] += timestep * Fg[1]/body['mass']
 
-    for body in bodies:
-        body.update(timestep)
-    step += timestep
+            body_history[i][0][step//timestep] = (bodies[i]['x'])
+            body_history[i][1][step//timestep] = (bodies[i]['y'])
 
-    for i in range(len(bodies)):
-        body_history[i].append([bodies[i].x, bodies[i].y])
+        for body in bodies:
+            body['x'] += timestep * body['vx']
+            body['y'] += timestep * body['vy']
+        step += timestep
+        print(step/simtime)
 
+sim(step, timestep, simtime, bodies, body_history, nbodies)
 
-# plot the results
-# plt.plot([body[0] for body in body_history[0]], [body[1] for body in body_history[0]], label="Earth", color="blue")
-# plt.plot([body[0] for body in body_history[1]], [body[1] for body in body_history[1]], label="Moon", color="gray")
-# plt.show()
+bodies = PDbodies
 
-# generating data of 100 elements
-# each for line 1
-x = [body[0] for body in body_history[0]]
-y = [body[1] for body in body_history[0]]
-data = np.array([x, y])
- 
-# generating data of 100 elements
-# each for line 2
-x2 = [body[0] for body in body_history[1]]
-y2 = [body[1] for body in body_history[1]]
-data2 = np.array([x2, y2])
-
-# setup the formatting for moving files
-Writer = animation.writers['ffmpeg']
-Writer = Writer(fps=10, metadata=dict(artist="Me"), bitrate=-1)
-
+# Create plot with equal scale axes
 fig = plt.figure()
-ax = fig.add_subplot(111)
-l, = ax.plot([], [], 'b-', label="Earth")
-ax2 = ax.twinx()
-k = ax2.plot([], [], 'r-', label="Moon")[0]
- 
-ax.legend([l, k], [l.get_label(), k.get_label()], loc=0)
- 
-ax.set_xlabel("X")
-ax.set_ylabel("Y")
+ax = fig.add_subplot()
 
-# axis 1
-ax.set_ylim(-384400000, 384400000)
-ax.set_xlim(-384400000, 384400000)
- 
-# axis 2
-ax2.set_ylim(-384400000, 384400000)
-ax2.set_xlim(-384400000, 384400000)
+# # Set axes limits
+ax.set_xlim(frame[0]-100000, frame[1]+100000)
+ax.set_ylim(frame[0]-100000, frame[1]+100000)
 
-plt.title('Two Body Simulation')
-time_text = ax.text(0.1, 0.95, "", transform=ax.transAxes,
-                    fontsize=15, color='red')
- 
-# set line_animation variable to call
-# the function recursively
-line_animation = animation.FuncAnimation(fig, updateline, frames=7*24*100, fargs=(data, l, data2, k))
-line_animation.save("lines.mp4", writer=Writer)
+# Set axes labels
+ax.set_xlabel('X (m)')
+ax.set_ylabel('Y (m)')
+ax.set_title('N-Body Simulation')
+
+# # plot the results
+for i in range(nbodies):
+    body = body_history[i]
+    ax.plot(body[0], body[1], color=bodies[i]['colour'], label=bodies[i]['name'], linewidth=1)
+
+ax.set_aspect('equal')
+#ax.legend()
+plt.show()
+
+# # Generate animation
+
+# # Generate high resolution animation
+# fig = plt.figure(dpi=300, figsize=(10, 10), facecolor='w', edgecolor='k')
+# ax = plt.axes(xlim=(frame[0]-100000, frame[1]+100000), ylim=(frame[0]-100000, frame[1]+100000))
+# ax.set_aspect('equal')
+# ax.set_xlabel('X (m)')
+# ax.set_ylabel('Y (m)')
+# ax.set_title('N-Body Simulation')
+
+# lines = []
+# for i in range(nbodies):
+#     line, = ax.plot([], [], color=bodies[i]['colour'], label=bodies[i]['name'], linewidth=1)
+#     lines.append(line)
+
+# def init():
+#     for line in lines:
+#         line.set_data([], [])
+#     return lines
+
+# def animate(i):
+#     for j in range(nbodies):
+#         body = body_history[j]
+#         lines[j].set_data(body[0][max(0, i-1000):i], body[1][max(0, i-1000):i])
+#     return lines
+
+# anim = animation.FuncAnimation(fig, animate, init_func=init, frames=len(body_history[0][0]),interval=1, blit=True).save('n_body_sim.mp4', fps=60, extra_args=['-vcodec', 'h264_nvenc'])
+
